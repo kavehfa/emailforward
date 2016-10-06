@@ -2,15 +2,24 @@
 console.log('Loading function');
 var aws = require('aws-sdk');
 
-const receiverEmail = "kaveh.azad@beyondaroom.com";
+const redirectToEmail = "kaveh.azad@beyondaroom.com";
+const settings = [{
+    subjectContains: ["RE: Reservation", "Cancelled", "wants to change their reservation", "Pending: Reservation Request", "Alternative amount requested:", "Reservation Confirmed"],
+    redirectTo: "mybooking@beyondaroom.com"
+}, {
+    subjectContains: ["booking enquiry", "RE: Pre-approval", "RE: Enquiry", "Enquiry at"],
+    redirectTo: "enquiry@beyondaroom.com"
+}];
+const senderEmailContains = "airbnb.com"
 
 exports.handler = (event, context, callback) => {
     var MailParser = require("mailparser").MailParser;
     var mailparser = new MailParser();
     //console.log('Received event:', JSON.stringify(event, null, 2));
     //var message = JSON.parse(event.Records[0].Sns.Message);
-    //console.log(JSON.stringify(event));
+    console.log(JSON.stringify(event));
     var message = JSON.parse(event.Records[0].Sns.Message);
+    console.log(message);
     var mailContent = message.content;
     //console.log(mailContent);
 
@@ -19,7 +28,15 @@ exports.handler = (event, context, callback) => {
         console.log("From:", mail_object.from); //[{address:'sender@example.com',name:'Sender Name'}]
         //console.log("Subject:", mail_object.subject); // Hello world!
         //console.log("Text body:", mail_object.text); // How are you today?
-        determinePath(mail_object);
+        var headers = message.mail.commonHeaders;
+        var from = headers.from[0];
+        var replyTo = from;
+        if (headers.replyTo != null && headers.replyTo.length > 0)
+            replyTo = headers.replyTo[0];
+
+        var originalReceiver = headers.to[0];
+
+        determinePath(from, replyTo, originalReceiver, mail_object);
     });
 
     // send the email source to the parser
@@ -27,28 +44,40 @@ exports.handler = (event, context, callback) => {
     mailparser.end();
 };
 
-function determinePath(parsedMail) {
-    var sender = parsedMail.from[0];
-    if (parsedMail.inReplyTo && parsedMail.inReplyTo.length > 0)
-        sender = parsedMail.inReplyTo[0];
-    if (parsedMail.to[0].address.indexOf('_redirect@beyondaroom.net') > -1) {
-        console.log('got response to redirected mail');
-    } else {
-        console.log('received mail from airbnb. redirecting mail');
+function determinePath(from, replyTo, originalReceiver, parsedMail) {
 
-        getMapping(sender.address, (err, data) => {
+    if (originalReceiver.indexOf('_redirect@beyondaroom.net') > -1) {
+        console.log('got response to redirected mail');
+        getMapping(originalReceiver, (err, data) => {
             if (err)
                 console.log(err);
             else {
-                var to = [receiverEmail];
+                if (data && data.Item) {
+                    console.log('loaded existing mapping -> ' + JSON.stringify(data.Item));
+                    var mapping = data.Item.mapping;
+                    sendMail(parsedMail, data.Item.replyFrom, [mapping]);
+                } else {
+                    console.log('Could not find mappings for reply');
+                }
+            }
+        })
+    } else {
+        console.log('received mail from airbnb. redirecting mail');
+
+        getMapping(replyTo, (err, data) => {
+            if (err)
+                console.log(err);
+            else {
+                var to = [redirectToEmail];
+                var mapping = null;
                 if (data && data.Item) {
                     console.log('loaded existing mapping -> ' + JSON.stringify(data.Item));
                     mapping = data.Item.mapping;
                     sendMail(parsedMail, mapping, to);
                 } else {
                     var rand = randomIntFromInterval(100000000000, 999999999999);
-                    var mapping = rand + "_redirect@beyondaroom.net";
-                    saveMappings(sender.address, mapping, (err, data) => {
+                    mapping = rand + "_redirect@beyondaroom.net";
+                    saveMappings(replyTo, mapping, originalReceiver, (err, data) => {
                         if (err)
                             console.log(err);
                         else {
@@ -62,21 +91,23 @@ function determinePath(parsedMail) {
     }
 }
 
-function saveMappings(original, mapped, callback) {
+function saveMappings(receiver, mapped, originalReceiver, callback) {
     var params = {
         RequestItems: {
             'email_redirect_mappings': [{
                 PutRequest: {
                     Item: {
-                        email: original,
-                        mapping: mapped
+                        email: receiver,
+                        mapping: mapped,
+                        replyFrom: originalReceiver
                     }
                 }
             }, {
                 PutRequest: {
                     Item: {
                         email: mapped,
-                        mapping: original
+                        mapping: receiver,
+                        replyFrom: originalReceiver
                     }
                 }
             }]
